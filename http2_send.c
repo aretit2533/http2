@@ -103,8 +103,13 @@ Len(3),Type(1), Flag(1), StreamId(4)
 int http2_reset_stream_build(HTTP2_CONNECTION *conn, unsigned int stream_id, int err_code, char *diag, char *err)
 {
     int l_len = (int)(ERROR_CODE_SIZE);
-    
+    STREAM_INFO *info;
     HTTP2_DATA *data_buff = NULL;
+	
+	info = http2_find_stream_info(conn, stream_id);
+	if(info){
+		info->state = FRAME_STATE_CLOSE;
+	}
     if(data_alloc(&data_buff, OVERHEAD_FRAME_SIZE + l_len, err) != 0)
     {
         return -1;
@@ -112,7 +117,8 @@ int http2_reset_stream_build(HTTP2_CONNECTION *conn, unsigned int stream_id, int
     OVERHEADER_ADD(data_buff->data, data_buff->len, l_len, FRAME_TYPE_RST_STREAM, 0, stream_id);
     SET_DATA_LENGTH_BYTE(err_code, data_buff->data + data_buff->len, ERROR_CODE_SIZE);
     data_buff->len += ERROR_CODE_SIZE;
-
+    
+    
     LIST_APPEND(conn->w_buffer, data_buff);
     return 0;
 }
@@ -483,10 +489,15 @@ int http2_build_data(STREAM_INFO *info, int p_curr, int end_stream, char *err)
     int use_len = 0;
     int f_set = 0;
     int curr = p_curr;
-    if((info->data_send.data_len - curr) > info->conn->http2_settings_recv[SETTINGS_MAX_FRAME_SIZE].setting_value)
+    int max_data_size = info->conn->http2_settings_recv[SETTINGS_MAX_FRAME_SIZE].setting_value;
+    if(max_data_size > info->conn->http2_settings_recv[SETTINGS_INITIAL_WINDOW_SIZE].setting_value)
     {
-        use_len = info->conn->http2_settings_recv[SETTINGS_MAX_FRAME_SIZE].setting_value;
-        if(data_alloc(&data_buff, info->conn->http2_settings_recv[SETTINGS_MAX_FRAME_SIZE].setting_value + OVERHEAD_FRAME_SIZE, err) != 0)
+        max_data_size = info->conn->http2_settings_recv[SETTINGS_INITIAL_WINDOW_SIZE].setting_value;
+    }
+    if((info->data_send.data_len - curr) > max_data_size)
+    {
+        use_len = max_data_size;
+        if(data_alloc(&data_buff, use_len + OVERHEAD_FRAME_SIZE, err) != 0)
         {
             return -1;
         }
@@ -497,9 +508,19 @@ int http2_build_data(STREAM_INFO *info, int p_curr, int end_stream, char *err)
         if(end_stream)
         {
             f_set |= FLAG_ENDSTREAM_TRUE;
-            info->state = FRAME_STATE_LOCAL_HALF_CLOSE;
+            switch(info->state)
+            {
+                case FRAME_STATE_IDLE:
+                case FRAME_STATE_OPEN:
+                     info->state = FRAME_STATE_LOCAL_HALF_CLOSE;
+                     break;
+                case FRAME_STATE_REMOTE_HALF_CLOSE:
+                     info->state = FRAME_STATE_CLOSE;
+                default:
+                     break;
+            }
         }
-        if(data_alloc(&data_buff, (info->data_send.data_len - curr) + OVERHEAD_FRAME_SIZE, err) != 0)
+        if(data_alloc(&data_buff, use_len + OVERHEAD_FRAME_SIZE, err) != 0)
         {
             return -1;
         }
@@ -538,6 +559,7 @@ int http2_create_msg(STREAM_INFO *info, int end_stream, char *err)
         if(info->data_send.data_len > 0 && !(http2_build_data(info, 0, end_stream, err)))
         {
             info->active_time = http2_get_current_time();
+            http2_stream_info_rotate(info);
             return 0;
         }
         else if(info->data_send.data_len > 0)
@@ -740,7 +762,10 @@ int http2_write(HTTP2_CONNECTION *conn, char *err)
     }
     if(sent_len < 0)
     {
-        HTTP2_PRINT_ERROR(err, "send return error [%s]", strerror(errno));
+        if(errno == EAGAIN) 
+			return 0;
+		
+		HTTP2_PRINT_ERROR(err, "send return error [%s]", strerror(errno));
         return -1;
     }
     if(conn->goaway_sent)

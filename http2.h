@@ -209,6 +209,7 @@ typedef struct _http2_connection_
     int recv_setting_f;
     int goaway_sent;
     int state;
+    int last_house_keeper;
     
     HTTP2_DATA *r_buffer;
     int w_buffer_curr;
@@ -258,6 +259,8 @@ struct _http2_stream_info_
     
     unsigned int stream_id;
     unsigned int version;
+    int frame_type;
+    int req_msg;
     
     HTTP2_DECODE_DATA data_send;
     HTTP2_DECODE_DATA data_recv;
@@ -290,10 +293,11 @@ int http2_dynamic_table_size_rotate(HTTP2_HEADER **dynamic, int *dynamic_count, 
 int http2_get_setting_value(HTTP2_CONNECTION *conn, int current_value, SETTING_TYPE type);
 int http2_window_update_calc(HTTP2_SETTINGS *http2_setting, unsigned int incremental_window_size, char *err);
 int http2_valid(STREAM_INFO *info, char *err);
-STREAM_INFO *http2_find_stream_info(HTTP2_CONNECTION *conn, unsigned int stream_id);
 int http2_stream_info_set_user_data(STREAM_INFO *info, void *user_data, int (*free_user_data_cb)(void*, char*));
 void * http2_stream_info_get_user_data(STREAM_INFO *info);
-int http2_conn_housekeeper(HTTP2_CONNECTION *conn, int stream_wait_timeout);
+STREAM_INFO *http2_find_stream_info(HTTP2_CONNECTION *conn, unsigned int stream_id);
+int http2_stream_info_rotate(STREAM_INFO *info);
+int http2_conn_housekeeper(HTTP2_CONNECTION *conn, unsigned long stream_wait_timeout);
 unsigned long http2_get_current_time();
 
 //HTTP2 SEND

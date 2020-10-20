@@ -14,7 +14,7 @@ HTTP2_TABLE *static_table = NULL;
 const char http2_magic[24] = {0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, 0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a};
 
 unsigned int version_count = 1;
-char lib_http2_version[] = "@(#libs/stack/http2) Version 1.0.0";
+char lib_http2_version[] = "1.0.4";
 
 int data_alloc(HTTP2_DATA **xml, int len, char *err)
 {
@@ -215,7 +215,7 @@ HTTP2_CONNECTION *http2_conn_init(HTTP2_MODE mode,
                  property->http2_settings_recv[count].setting_value = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS;
                  break;
             case SETTINGS_INITIAL_WINDOW_SIZE:
-                 if(initial_windows_size) property->http2_settings_send[count].setting_value = *initial_windows_size;
+                 if(initial_windows_size && (*initial_windows_size >= 1 && *initial_windows_size <= MAX_SETTINGS_INITIAL_WINDOW_SIZE)) property->http2_settings_send[count].setting_value = *initial_windows_size;
                  else property->http2_settings_send[count].setting_value = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
                  property->http2_settings_recv[count].setting_value = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
                  break;
@@ -233,8 +233,6 @@ HTTP2_CONNECTION *http2_conn_init(HTTP2_MODE mode,
                  break;
         }
     }
-    
-    memcpy(property->http2_settings_recv, property->http2_settings_send, sizeof(property->http2_settings_recv));
     
     return property;
 }
@@ -269,6 +267,7 @@ int http2_destroy(HTTP2_CONNECTION **conn)
             {
                 LIST_REMOVE((*conn)->stream_info_list[c], s_tmp);
                 s_tmp->conn = NULL;
+				s_tmp->state = FRAME_STATE_CLOSE;
                 http2_stream_info_destroy(&s_tmp, HTTP2_ERROR_CODE_INTERNAL_ERROR,"Connection closed.");
                 s_tmp = (*conn)->stream_info_list[c];
             }
@@ -282,27 +281,28 @@ int http2_destroy(HTTP2_CONNECTION **conn)
 
 STREAM_INFO* http2_stream_info_init(HTTP2_CONNECTION *conn, unsigned int *last_stream_id, int init_id, unsigned int *concurrent, unsigned int setting_concurrent, char *err)
 {
+    if(setting_concurrent != DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS && *concurrent >= setting_concurrent)
+    {
+        HTTP2_PRINT_ERROR(err, "Max concurrent stream [%u:%u]", *concurrent, setting_concurrent);
+        return NULL;
+    }
     STREAM_INFO *info = (STREAM_INFO*) malloc(sizeof(STREAM_INFO));
     if(!info)
     {
         HTTP2_PRINT_ERROR(err, "Can not allocate memory size (%lu)", sizeof(STREAM_INFO));
         return NULL;
     }
-    if(setting_concurrent != DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS && *concurrent >= setting_concurrent)
-    {
-        HTTP2_PRINT_ERROR(err, "Max concurrent stream [%d:%d]", *concurrent, setting_concurrent);
-        return NULL;
-    }
     info->conn = conn;
     info->stream_id = *last_stream_id;
     *last_stream_id += 2;
-    if(conn->last_stream_id_send > MAX_STREAM_ID)
+    if(*last_stream_id > MAX_STREAM_ID)
     {
         *last_stream_id = init_id;
     }
     info->state = FRAME_STATE_IDLE;
     info->active_time = http2_get_current_time();
     info->stream_pp = 0;
+    info->req_msg = 0;
     info->version = conn->version;
     info->user_data = NULL;
     info->r_buffer = NULL;
@@ -332,6 +332,39 @@ int http2_stream_info_set_user_data(STREAM_INFO *info, void *user_data, int (*fr
 void * http2_stream_info_get_user_data(STREAM_INFO *info)
 {
     return info->user_data;
+}
+
+STREAM_INFO *http2_find_stream_info(HTTP2_CONNECTION *conn, unsigned int stream_id)
+{
+    int id_bucket;
+    id_bucket = stream_id % MAX_STREAM_INFO_LIST;
+    STREAM_INFO *info = conn->stream_info_list[id_bucket];
+    if(info)
+    {
+        do
+        {
+            if(info->stream_id == stream_id)
+            {
+                return info;
+            }
+            info = info->next;
+        }
+        while(info != conn->stream_info_list[id_bucket]);
+    }
+    return NULL;
+}
+
+int http2_stream_info_rotate(STREAM_INFO *info)
+{
+    int id_bucket;
+    id_bucket = info->stream_id % MAX_STREAM_INFO_LIST;
+    STREAM_INFO *info_tmp = info->conn->stream_info_list[id_bucket];
+    if(info_tmp)
+    {
+        LIST_REMOVE(info->conn->stream_info_list[id_bucket], info);
+        LIST_APPEND(info->conn->stream_info_list[id_bucket], info);
+    }
+    return -1;
 }
 
 int http2_stream_info_destroy(STREAM_INFO **info, HTTP2_ERROR_CODE err_code, char *diag)
@@ -531,12 +564,19 @@ int http2_valid(STREAM_INFO *info, char *err)
     return 1;
 }
 
-int http2_conn_housekeeper(HTTP2_CONNECTION *conn, int stream_wait_timeout)
+int http2_conn_housekeeper(HTTP2_CONNECTION *conn, unsigned long stream_wait_timeout)
 {
     int c;
     char err[1024];
-    for(c = 0; c < MAX_STREAM_INFO_LIST; c++)
+    unsigned long begin_time = http2_get_current_time();
+    if(conn->last_house_keeper < 0 || conn->last_house_keeper >= (MAX_STREAM_INFO_LIST - 1))
+        conn->last_house_keeper = 0;
+    for(c = conn->last_house_keeper; c < MAX_STREAM_INFO_LIST; c++)
     {
+        unsigned long current_time = http2_get_current_time();
+        if (current_time - begin_time > 200000)
+            break;
+        conn->last_house_keeper = c;
         if(conn->stream_info_list[c])
         {
             STREAM_INFO *s_tmp = conn->stream_info_list[c];
@@ -551,10 +591,14 @@ int http2_conn_housekeeper(HTTP2_CONNECTION *conn, int stream_wait_timeout)
                     http2_reset_stream_build(conn, s_tmp->stream_id, HTTP2_ERROR_CODE_CANCEL, "Wait timeout", err);
                     STREAM_INFO *rm_tmp = s_tmp->next;
                     LIST_REMOVE(conn->stream_info_list[c], s_tmp);
-                    s_tmp->conn = NULL;
+					s_tmp->state = FRAME_STATE_CLOSE;
                     http2_stream_info_destroy(&s_tmp, HTTP2_ERROR_CODE_REFUSED_STREAM, "Wait timeout");
                     s_tmp = rm_tmp;
                     if(root_change) s_root = conn->stream_info_list[c];
+                }
+                else
+                {
+                    break;
                 }
             } while(conn->stream_info_list[c] && (s_tmp != conn->stream_info_list[c] || root_change));
         }

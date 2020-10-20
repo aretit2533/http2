@@ -35,10 +35,11 @@ Setting value as below.
 #define DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS 0x00 //RFC7540 define (infinite) but lib set defualt as 100
 #define DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE    0xFFFF
 #define DEFAULT_SETTINGS_MAX_FRAME_SIZE         0x4000
+#define MAX_SETTINGS_INITIAL_WINDOW_SIZE        0x7FFFFFFF
 #define MAX_SETTINGS_MAX_FRAME_SIZE             0xFFFFFF //(2^24) -1
 #define DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE   0x00
 
-#define MAX_SETTING_LENGTH                      0x7FFFFFFF //(2^31)
+#define MAX_SETTING_LENGTH                      0x7FFFFFFF //(2^31) - 1
 
 #define HTTP_H_NAME_SIZE    256
 #define HTTP_H_VALUE_SIZE   2048

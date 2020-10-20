@@ -37,42 +37,6 @@ static int http2_extract_data(HTTP2_CONNECTION *conn, STREAM_INFO *info, char *p
     printf("%s\n", buff);
 }*/
 
-void http2_extract_overhead(char *raw_data, unsigned int *stream_id, int *frame_type, int *frame_len, int *flag)
-{
-    int curr = 0;
-    *stream_id = *frame_type = *frame_len = *flag = 0;
-    GET_DATA_LENGTH_BYTE(raw_data + curr, *frame_len, FRAME_LEN_SIZE);
-    curr += FRAME_LEN_SIZE;
-    GET_DATA_LENGTH_BYTE(raw_data + curr, *frame_type, TYPE_SIZE);
-    curr += TYPE_SIZE;
-    GET_DATA_LENGTH_BYTE(raw_data + curr, *flag, FLAG_SIZE);
-    curr += FLAG_SIZE;
-    GET_DATA_LENGTH_BYTE(raw_data + curr, *stream_id, STREAM_ID_SIZE);
-    curr += STREAM_ID_SIZE;
-    
-    *stream_id &= MAX_STREAM_ID;
-}
-
-STREAM_INFO *http2_find_stream_info(HTTP2_CONNECTION *conn, unsigned int stream_id)
-{
-    int id_bucket;
-    id_bucket = stream_id % MAX_STREAM_INFO_LIST;
-    STREAM_INFO *info = conn->stream_info_list[id_bucket];
-    if(info)
-    {
-        do
-        {
-            if(info->stream_id == stream_id)
-            {
-                return info;
-            }
-            info = info->next;
-        }
-        while(info != conn->stream_info_list[id_bucket]);
-    }
-    return NULL;
-}
-
 //find_table_by_index return 0 if fail 1 if success
 int find_table_by_index(HTTP2_CONNECTION *conn, int index, char *name, char *value)
 {
@@ -128,6 +92,22 @@ int find_table_name_by_index(HTTP2_CONNECTION *conn, int index, char *name)
     return 0;
 }
 
+void http2_extract_overhead(char *raw_data, unsigned int *stream_id, int *frame_type, int *frame_len, int *flag)
+{
+    int curr = 0;
+    *stream_id = *frame_type = *frame_len = *flag = 0;
+    GET_DATA_LENGTH_BYTE(raw_data + curr, *frame_len, FRAME_LEN_SIZE);
+    curr += FRAME_LEN_SIZE;
+    GET_DATA_LENGTH_BYTE(raw_data + curr, *frame_type, TYPE_SIZE);
+    curr += TYPE_SIZE;
+    GET_DATA_LENGTH_BYTE(raw_data + curr, *flag, FLAG_SIZE);
+    curr += FLAG_SIZE;
+    GET_DATA_LENGTH_BYTE(raw_data + curr, *stream_id, STREAM_ID_SIZE);
+    curr += STREAM_ID_SIZE;
+    
+    *stream_id &= MAX_STREAM_ID;
+}
+
 static int http2_add_header_recv(STREAM_INFO *info, char *name, char *value, char *err)
 {
     HTTP2_HEADER *header = (HTTP2_HEADER *) malloc(sizeof(HTTP2_HEADER));
@@ -148,7 +128,7 @@ static int http2_add_data_recv(STREAM_INFO *info, char *data, int len, char *err
 {
     if(info->data_recv.data != NULL)
     {
-        char *x_buff = (char *) realloc(info->data_recv.data, info->data_recv.data_len + len);
+        char *x_buff = (char *) realloc(info->data_recv.data, info->data_recv.data_len + len + 1);
         if(!x_buff)
         {
             HTTP2_PRINT_ERROR(err, "Can not allocate memory size (%d)", info->data_send.data_len + len);
@@ -158,7 +138,7 @@ static int http2_add_data_recv(STREAM_INFO *info, char *data, int len, char *err
     }
     else
     {
-        info->data_recv.data = (char*)malloc(len);
+        info->data_recv.data = (char*)malloc(len + 1);
         info->data_recv.data_len = 0;
     }
     
@@ -316,6 +296,7 @@ static int http2_extract_header(HTTP2_CONNECTION *conn, STREAM_INFO *info, char 
              info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_REMOTE_HALF_CLOSE:FRAME_STATE_OPEN;
              break;
         case FRAME_STATE_LOCAL_HALF_CLOSE:
+        case FRAME_STATE_REMOTE_HALF_CLOSE:
              if(!info->stream_pp)
              {
                  info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_CLOSE:FRAME_STATE_LOCAL_HALF_CLOSE;
@@ -654,14 +635,15 @@ static int http2_extract_data(HTTP2_CONNECTION *conn, STREAM_INFO *info, char *p
     switch(info->state)
     {
         case FRAME_STATE_OPEN:
-             info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_REMOTE_HALF_CLOSE:FRAME_STATE_OPEN;
+             info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_REMOTE_HALF_CLOSE:info->state;
              break;
         case FRAME_STATE_LOCAL_HALF_CLOSE:
-             info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_CLOSE:FRAME_STATE_LOCAL_HALF_CLOSE;
+        case FRAME_STATE_REMOTE_HALF_CLOSE:
+             info->state = (info->data_recv.stream_flag & FLAG_ENDSTREAM_TRUE) ? FRAME_STATE_CLOSE:info->state;
              break;
         default:
-             info->state = FRAME_STATE_CLOSE;
              HTTP2_PRINT_ERROR(err, "Recv data invalid state [%d]", info->state);
+			 info->state = FRAME_STATE_CLOSE;
              http2_reset_stream_build(conn, info->stream_id, HTTP2_ERROR_CODE_FLOW_CONTROL_ERROR, "", err);
              return HTTP2_RETURN_STREAM_CLOSE;
     }
@@ -734,7 +716,7 @@ HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, i
     conn->r_buffer->len -= (frame_len + OVERHEAD_FRAME_SIZE);
     
     
-    if(frame_len > conn->http2_settings_send[SETTINGS_INITIAL_WINDOW_SIZE].setting_value)
+    if(frame_len > conn->http2_settings_send[SETTINGS_MAX_FRAME_SIZE].setting_value)
     {
         http2_reset_stream_build(conn, stream_id, HTTP2_ERROR_CODE_FRAME_SIZE_ERROR, "Frame size exceed", err);
         return HTTP2_RETURN_SKIP_DATA;
@@ -778,8 +760,7 @@ HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, i
                          }
                          return HTTP2_RETURN_ERROR;
                      }
-                     info->stream_id = stream_id;
-                     conn->last_stream_id_recv = stream_id;
+                     conn->last_stream_id_recv = info->stream_id;
                      break;
                 case HTTP2_MODE_CLIENT:
                      //Recv from server
@@ -800,14 +781,16 @@ HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, i
                          }
                          return HTTP2_RETURN_ERROR;
                      }
-                     info->stream_id = stream_id;
-                     conn->last_stream_id_recv = stream_id;
+                     conn->last_stream_id_recv = info->stream_id;
                      break;
                 default:
                      break;
             }
         }
-        if(info) info->active_time = http2_get_current_time();
+        if (info) {
+            info->active_time = http2_get_current_time();
+            http2_stream_info_rotate(info);
+        }
     }
     *info_ret = info;
     *frame_type_ret = frame_type;
@@ -816,8 +799,10 @@ HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, i
     {
         case FRAME_TYPE_DATA:
              printf("recv FRAME_TYPE_DATA\n");
-             http2_window_update_build(conn, stream_id, frame_len);
-             http2_window_update_build(conn, GLOBAL_STREAM_ID, frame_len);
+			 if(frame_len > 0){
+				http2_window_update_build(conn, info->stream_id, frame_len);
+				http2_window_update_build(conn, GLOBAL_STREAM_ID, frame_len);
+			 }
              ret = http2_extract_data(conn, info, process_p, frame_len, flag, err);
              break;
         case FRAME_TYPE_HEADER:
