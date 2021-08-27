@@ -14,7 +14,7 @@ HTTP2_TABLE *static_table = NULL;
 const char http2_magic[24] = {0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, 0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a};
 
 unsigned int version_count = 1;
-char lib_http2_version[] = "1.0.4";
+char lib_http2_version[] = "@(#libs/stack/http2) Version 1.0.4";
 
 int data_alloc(HTTP2_DATA **xml, int len, char *err)
 {
@@ -481,7 +481,7 @@ int http2_window_update_calc(HTTP2_SETTINGS *http2_setting, unsigned int increme
     {
         if((http2_setting[SETTINGS_INITIAL_WINDOW_SIZE].setting_value + incremental_window_size) > MAX_SETTING_LENGTH)
         {
-            HTTP2_PRINT_ERROR(err, "Window size exceed [%d] [%d]", MAX_SETTING_LENGTH, (http2_setting[SETTINGS_INITIAL_WINDOW_SIZE].setting_value + incremental_window_size));
+            HTTP2_PRINT_ERROR(err, "Window size exceed [%u] [%u]", MAX_SETTING_LENGTH, (http2_setting[SETTINGS_INITIAL_WINDOW_SIZE].setting_value + incremental_window_size));
             return -1;
         }
         http2_setting[SETTINGS_INITIAL_WINDOW_SIZE].setting_value += incremental_window_size;
@@ -588,11 +588,17 @@ int http2_conn_housekeeper(HTTP2_CONNECTION *conn, unsigned long stream_wait_tim
                 if((s_tmp->active_time + (stream_wait_timeout * 1000000)) < http2_get_current_time())
                 {
                     if(s_root == s_tmp) root_change = 1;
-                    http2_reset_stream_build(conn, s_tmp->stream_id, HTTP2_ERROR_CODE_CANCEL, "Wait timeout", err);
                     STREAM_INFO *rm_tmp = s_tmp->next;
-                    LIST_REMOVE(conn->stream_info_list[c], s_tmp);
-					s_tmp->state = FRAME_STATE_CLOSE;
-                    http2_stream_info_destroy(&s_tmp, HTTP2_ERROR_CODE_REFUSED_STREAM, "Wait timeout");
+                    if ((s_tmp->stream_id % 2 == 1 && conn->mode == HTTP2_MODE_CLIENT) || (s_tmp->stream_id % 2 == 0 && conn->mode == HTTP2_MODE_SERVER)) {
+                        //Self request must cancel
+                        http2_stream_info_destroy(&s_tmp, HTTP2_ERROR_CODE_CANCEL, "Wait timeout");
+                    } else if ((s_tmp->stream_id % 2 == 1 && conn->mode == HTTP2_MODE_SERVER) || (s_tmp->stream_id % 2 == 0 && conn->mode == HTTP2_MODE_CLIENT)) {
+                        //Peer request mus response
+                        http2_add_header(s_tmp, ":status", "504", err);
+                        http2_add_header(s_tmp, "server", lib_http2_version, err);
+                        http2_create_msg(s_tmp, 1, err);
+                        http2_stream_info_destroy(&s_tmp, HTTP2_ERROR_CODE_CANCEL, "Wait timeout");
+                    }
                     s_tmp = rm_tmp;
                     if(root_change) s_root = conn->stream_info_list[c];
                 }

@@ -323,6 +323,8 @@ int http2_write(HTTP2_CONNECTION *conn, char *err);
 
 //HTTP2 RECV
 int http2_read(HTTP2_CONNECTION *conn, char *err);
+int http2_add_header_recv(STREAM_INFO *info, char *name, char *value, char *err);
+int http2_add_data_recv(STREAM_INFO *info, char *data, int len, char *err);
 HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, int *len, char *err);
 
 #endif

@@ -15,7 +15,7 @@ PF_CCFLAG=-DOS_LINUX -DM_GENERIC_INT32 -m64 -fPIC -Og -Wall -gdwarf-2
 PROJ_CC=$(PF_CC)
 PROJ_CCFLAG=$(PF_CCFLAG) $(INCLUDE_CCFLAG) $(HUFFMAN_CCFLAG) -I.
 
-OBJECTS = http2_common.o http2_send.o http2_recv.o $(HUFFMAN_DIR)/huffman.o
+OBJECTS = http1.o http2_common.o http2_send.o http2_recv.o $(HUFFMAN_DIR)/huffman.o
 
 clean:
 	rm -f *.o *.a $(OBJECTS)

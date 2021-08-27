@@ -108,7 +108,7 @@ void http2_extract_overhead(char *raw_data, unsigned int *stream_id, int *frame_
     *stream_id &= MAX_STREAM_ID;
 }
 
-static int http2_add_header_recv(STREAM_INFO *info, char *name, char *value, char *err)
+int http2_add_header_recv(STREAM_INFO *info, char *name, char *value, char *err)
 {
     HTTP2_HEADER *header = (HTTP2_HEADER *) malloc(sizeof(HTTP2_HEADER));
     if(!header)
@@ -124,7 +124,7 @@ static int http2_add_header_recv(STREAM_INFO *info, char *name, char *value, cha
     return 0;
 }
 
-static int http2_add_data_recv(STREAM_INFO *info, char *data, int len, char *err)
+int http2_add_data_recv(STREAM_INFO *info, char *data, int len, char *err)
 {
     if(info->data_recv.data != NULL)
     {
@@ -844,6 +844,10 @@ HTTP2_RETURN_CODE http2_decode(HTTP2_CONNECTION *conn, STREAM_INFO **info_ret, i
         case FRAME_TYPE_WINDOW_UPDATE:
              printf("recv FRAME_TYPE_WINDOW_UPDATE\n");
              ret = http2_extract_window_update(conn, info, process_p, frame_len, flag, err);
+             if (info && info->stream_id != GLOBAL_STREAM_ID && info->state == FRAME_STATE_IDLE) {
+                info->state = FRAME_STATE_CLOSE;
+                ret = HTTP2_RETURN_STREAM_CLOSE;
+             }
              break;
         case FRAME_TYPE_CONTINUATION:
              printf("recv FRAME_TYPE_CONTINUATION\n");
@@ -886,11 +890,15 @@ int http2_read(HTTP2_CONNECTION *conn, char *err)
         read_len = recv(conn->sock, conn->r_buffer->data + conn->r_buffer->len, (conn->r_buffer->size - conn->r_buffer->len), 0);
         if(read_len == 0)
         {
-            HTTP2_PRINT_ERROR(err, "Socket [%d] version [%d] has benn close", conn->sock, conn->version);
+            HTTP2_PRINT_ERROR(err, "Socket [%d] version [%d] has been close", conn->sock, conn->version);
             return -1;
         }
         if(read_len < 0)
         {
+            if (errno == EAGAIN) {
+                HTTP2_PRINT_ERROR(err, "Socket under processing [%s]", strerror(errno));
+                return 1;
+            }
             HTTP2_PRINT_ERROR(err, "recv return error [%s]", strerror(errno));
             return -1;
         }
